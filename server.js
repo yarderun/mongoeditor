@@ -26,6 +26,12 @@ async function connectToMongoDB() {
     client = new MongoClient(MONGODB_URI, {
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
+      retryWrites: false,
+      serverApi: {
+        version: "1",
+        strict: false,
+        deprecationErrors: false,
+      },
     })
     await client.connect()
     const dbName = new URL(MONGODB_URI).pathname.slice(1) || "admin"

@@ -269,6 +269,12 @@ function renderDocumentsTable(documents) {
                 .join("")}
               <td class="actions-cell">
                 <div class="action-buttons">
+                  <button class="icon-btn" onclick="viewBeautiful('${id}')" title="Güzel Görünüm">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                      <circle cx="12" cy="12" r="3"/>
+                    </svg>
+                  </button>
                   <button class="icon-btn" onclick="editDocument('${id}')" title="Düzenle">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
@@ -663,3 +669,360 @@ function attachEventListeners() {
 
 // Start the app
 init()
+
+// Beautiful View Functions
+function formatTurkishDate(dateString) {
+  const date = new Date(dateString)
+  const months = [
+    "Ocak",
+    "Şubat",
+    "Mart",
+    "Nisan",
+    "Mayıs",
+    "Haziran",
+    "Temmuz",
+    "Ağustos",
+    "Eylül",
+    "Ekim",
+    "Kasım",
+    "Aralık",
+  ]
+  const day = date.getDate()
+  const month = months[date.getMonth()]
+  const year = date.getFullYear()
+  const hours = String(date.getHours()).padStart(2, "0")
+  const minutes = String(date.getMinutes()).padStart(2, "0")
+  return `${day} ${month} ${year}, ${hours}:${minutes}`
+}
+
+async function viewBeautiful(id) {
+  try {
+    const doc = await fetchAPI(
+      `/api/collections/${currentCollection}/documents/${id}?database=${currentDatabase}`,
+    )
+
+    const modal = document.getElementById("beautifulViewModal")
+    const content = document.getElementById("beautifulViewContent")
+
+    // Build metadata from available fields
+    const metaFields = []
+    if (doc.language) metaFields.push(`<span class="meta-badge"><strong>Dil:</strong> ${doc.language}</span>`)
+    if (doc.model) metaFields.push(`<span class="meta-badge"><strong>Model:</strong> ${doc.model}</span>`)
+    if (doc.updatedAt) metaFields.push(`<span class="meta-badge"><strong>Güncellenme:</strong> ${formatTurkishDate(doc.updatedAt)}</span>`)
+    if (doc.createdAt) metaFields.push(`<span class="meta-badge"><strong>Oluşturulma:</strong> ${formatTurkishDate(doc.createdAt)}</span>`)
+
+    // Render the beautiful view
+    let html = `
+      <div class="beautiful-document">
+        <div class="beautiful-header">
+          <h1 class="beautiful-title">${doc.title || doc.subject || doc.name || "Başlıksız Döküman"}</h1>
+          <div class="beautiful-meta">
+            ${metaFields.join("")}
+          </div>
+        </div>
+    `
+
+    // Check for messages directly
+    if (doc.messages && Array.isArray(doc.messages) && doc.messages.length > 0) {
+      html += renderMessagesChat(doc.messages, id)
+    }
+    // Check for chats object
+    else if (doc.chats && typeof doc.chats === "object") {
+      const chatsArray = Object.entries(doc.chats)
+      if (chatsArray.length > 0) {
+        html += renderChatsWithTabs(chatsArray, id)
+      } else {
+        html += renderOtherContent(doc)
+      }
+    } else {
+      html += renderOtherContent(doc)
+    }
+
+    html += `</div>`
+
+    content.innerHTML = html
+    
+    // Set the first chat tab as active if exists
+    setTimeout(() => {
+      const firstTab = document.querySelector(".chat-tab")
+      if (firstTab) {
+        firstTab.click()
+      }
+    }, 0)
+    
+    modal.classList.add("show")
+  } catch (error) {
+    console.error("Döküman yüklenemedi:", error)
+  }
+}
+
+function renderChatsWithTabs(chatsArray, docId) {
+  let html = `
+    <div class="chats-container">
+      <div class="chat-tabs-wrapper">
+        <div class="chat-tabs">
+  `
+
+  // Create tabs for each chat
+  chatsArray.forEach(([chatId, chatData], index) => {
+    const chatTitle = chatData.title || chatData.name || `Sohbet #${index + 1}`
+    const messageCount = chatData.messages ? chatData.messages.length : 0
+    const tabId = `chat-tab-${docId}-${chatId}`
+    const contentId = `${docId}-${chatId}`
+    const activeClass = index === 0 ? "active" : ""
+    
+    html += `
+      <button class="chat-tab ${activeClass}" data-tab-id="${tabId}" onclick="switchChatTab('${tabId}', '${contentId}')">
+        <span class="tab-title">${escapeHtml(chatTitle)}</span>
+        <span class="tab-badge">${messageCount}</span>
+      </button>
+    `
+  })
+
+  html += `
+        </div>
+      </div>
+      <div class="chat-content-wrapper">
+  `
+
+  // Create content for each chat
+  chatsArray.forEach(([chatId, chatData], index) => {
+    const contentId = `${docId}-${chatId}`
+    const messages = chatData.messages || []
+    const displayClass = index === 0 ? "active" : ""
+    
+    html += `
+      <div class="chat-content ${displayClass}" data-content-id="${contentId}">
+    `
+    
+    if (messages.length > 0) {
+      html += `<div class="beautiful-messages">`
+      
+      messages.forEach((msg, msgIndex) => {
+        const isUser = msg.role === "user" || msg.role === "user_message"
+        const msgContent = msg.content || msg.text || ""
+        const uniqueId = `msg-${docId}-${chatId}-${msgIndex}`
+        const timeHtml = msg.timestamp ? `<span class="message-time">${formatTurkishDate(new Date(msg.timestamp).toISOString())}</span>` : ""
+
+        if (msgContent.length > 400) {
+          const shortened = msgContent.substring(0, 400)
+          html += `
+            <div class="message-bubble ${isUser ? "user-message" : "assistant-message"}">
+              <div class="message-header">
+                <span class="message-role">${isUser ? "👤 Sen" : "🤖 Asistan"}</span>
+                ${timeHtml}
+              </div>
+              <div class="message-content">
+                <span class="message-truncated" id="truncated-${uniqueId}">
+                  ${escapeHtml(shortened)}...
+                  <button class="expand-btn" onclick="toggleExpandMsg('${uniqueId}', '${escapeHtml(msgContent).replace(/'/g, "&#39;")}')">Devamını Göster</button>
+                </span>
+                <span class="message-expanded" id="expanded-${uniqueId}" style="display: none;">
+                  ${escapeHtml(msgContent)}
+                  <button class="expand-btn" onclick="toggleExpandMsg('${uniqueId}')">Gizle</button>
+                </span>
+              </div>
+            </div>
+          `
+        } else {
+          html += `
+            <div class="message-bubble ${isUser ? "user-message" : "assistant-message"}">
+              <div class="message-header">
+                <span class="message-role">${isUser ? "👤 Sen" : "🤖 Asistan"}</span>
+                ${timeHtml}
+              </div>
+              <div class="message-content">
+                ${escapeHtml(msgContent)}
+              </div>
+            </div>
+          `
+        }
+      })
+      
+      html += `</div>`
+    } else {
+      html += `
+        <div class="empty-chat">
+          <p>Bu sohbette mesaj yok</p>
+        </div>
+      `
+    }
+    
+    html += `</div>`
+  })
+
+  html += `
+      </div>
+    </div>
+  `
+  
+  return html
+}
+
+function switchChatTab(tabId, contentId) {
+  // Remove active class from all tabs
+  document.querySelectorAll(".chat-tab").forEach(tab => {
+    tab.classList.remove("active")
+  })
+  
+  // Add active class to clicked tab
+  const clickedTab = document.querySelector(`[data-tab-id="${tabId}"]`)
+  if (clickedTab) {
+    clickedTab.classList.add("active")
+  }
+  
+  // Hide all chat contents
+  document.querySelectorAll(".chat-content").forEach(content => {
+    content.classList.remove("active")
+  })
+  
+  // Show the selected chat content
+  const contentElement = document.querySelector(`[data-content-id="${contentId}"]`)
+  if (contentElement) {
+    contentElement.classList.add("active")
+    // Scroll to top of chat content
+    contentElement.scrollIntoView({ behavior: "smooth", block: "start" })
+  }
+}
+
+function renderMessagesChat(messages, id) {
+  let html = `<div class="beautiful-messages">`
+
+  messages.forEach((msg, index) => {
+    const isUser = msg.role === "user" || msg.role === "user_message"
+    const msgContent = msg.content || msg.text || ""
+    const uniqueId = `msg-${id}-${index}`
+    const timeHtml = msg.timestamp ? `<span class="message-time">${formatTurkishDate(new Date(msg.timestamp).toISOString())}</span>` : ""
+
+    if (msgContent.length > 400) {
+      const shortened = msgContent.substring(0, 400)
+      html += `
+        <div class="message-bubble ${isUser ? "user-message" : "assistant-message"}">
+          <div class="message-header">
+            <span class="message-role">${isUser ? "👤 Sen" : "🤖 Asistan"}</span>
+            ${timeHtml}
+          </div>
+          <div class="message-content">
+            <span class="message-truncated" id="truncated-${uniqueId}">
+              ${escapeHtml(shortened)}...
+              <button class="expand-btn" onclick="toggleExpandMsg('${uniqueId}', '${escapeHtml(msgContent).replace(/'/g, "&#39;")}')">Devamını Göster</button>
+            </span>
+            <span class="message-expanded" id="expanded-${uniqueId}" style="display: none;">
+              ${escapeHtml(msgContent)}
+              <button class="expand-btn" onclick="toggleExpandMsg('${uniqueId}')">Gizle</button>
+            </span>
+          </div>
+        </div>
+      `
+    } else {
+      html += `
+        <div class="message-bubble ${isUser ? "user-message" : "assistant-message"}">
+          <div class="message-header">
+            <span class="message-role">${isUser ? "👤 Sen" : "🤖 Asistan"}</span>
+            ${timeHtml}
+          </div>
+          <div class="message-content">
+            ${escapeHtml(msgContent)}
+          </div>
+        </div>
+      `
+    }
+  })
+
+  html += `</div>`
+  return html
+}
+
+function renderOtherContent(doc) {
+  let html = `<div class="beautiful-content">`
+
+  // List all non-technical fields
+  const technicalFields = ["_id", "userId", "user_id", "createdAt", "updatedAt", "__v", "id", "messages", "chats"]
+  for (const [key, value] of Object.entries(doc)) {
+    if (technicalFields.includes(key) || value === null || value === undefined) continue
+    if (key === "title" || key === "subject" || key === "name") continue
+    if (Array.isArray(value) && value.length === 0) continue
+
+    const displayValue = typeof value === "object" ? JSON.stringify(value, null, 2) : String(value)
+    const uniqueId = `field-${key}`
+
+    if (displayValue.length > 300) {
+      const shortened = displayValue.substring(0, 300)
+      html += `
+        <div class="content-field">
+          <div class="field-label">${key}</div>
+          <div class="field-content">
+            <span class="message-truncated" id="truncated-${uniqueId}">
+              ${escapeHtml(shortened)}...
+              <button class="expand-btn" onclick="toggleExpandMsg('${uniqueId}', '${escapeHtml(displayValue).replace(/'/g, "&#39;")}')">Devamını Göster</button>
+            </span>
+            <span class="message-expanded" id="expanded-${uniqueId}" style="display: none;">
+              ${escapeHtml(displayValue)}
+              <button class="expand-btn" onclick="toggleExpandMsg('${uniqueId}')">Gizle</button>
+            </span>
+          </div>
+        </div>
+      `
+    } else {
+      html += `
+        <div class="content-field">
+          <div class="field-label">${key}</div>
+          <div class="field-content">
+            ${escapeHtml(displayValue)}
+          </div>
+        </div>
+      `
+    }
+  }
+
+  html += `</div>`
+  return html
+}
+
+function truncateWithToggle(text, limit, id) {
+  if (text.length <= limit) {
+    return escapeHtml(text)
+  }
+
+  const shortened = text.substring(0, limit)
+  return `
+    <span class="message-truncated" id="truncated-${id}">
+      ${escapeHtml(shortened)}...
+      <button class="expand-btn" onclick="toggleExpand('${id}', '${escapeHtml(text)}')">Devamını Göster</button>
+    </span>
+    <span class="message-expanded" id="expanded-${id}" style="display: none;">
+      ${escapeHtml(text)}
+      <button class="expand-btn" onclick="toggleExpand('${id}')">Gizle</button>
+    </span>
+  `
+}
+
+function toggleExpandMsg(id, fullText) {
+  const truncated = document.getElementById(`truncated-${id}`)
+  const expanded = document.getElementById(`expanded-${id}`)
+
+  if (truncated && expanded) {
+    if (truncated.style.display === "none") {
+      truncated.style.display = "inline"
+      expanded.style.display = "none"
+    } else {
+      truncated.style.display = "none"
+      expanded.style.display = "inline"
+    }
+  }
+}
+
+function toggleExpand(id, fullText) {
+  toggleExpandMsg(id, fullText)
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div")
+  div.textContent = text
+  return div.innerHTML
+}
+
+function closeBeautifulView() {
+  const modal = document.getElementById("beautifulViewModal")
+  modal.classList.remove("show")
+}
