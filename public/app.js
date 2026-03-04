@@ -1,10 +1,13 @@
-// Global state
+﻿// Global state
 let currentDatabase = ""
 let currentCollection = ""
 let currentPage = 1
 let currentSort = "_id"
 let currentOrder = "desc"
 let currentFilter = "{}"
+let currentEngine = "mongo"
+let currentPrimaryKey = "_id"
+const DEFAULT_PG_SCHEMA = "public"
 const selectedDocuments = new Set()
 
 // API helpers
@@ -32,10 +35,30 @@ async function fetchAPI(endpoint, options = {}) {
   }
 }
 
+function buildQuery(extra = {}) {
+  const params = new URLSearchParams()
+
+  if (currentDatabase) {
+    params.set("database", currentDatabase)
+  }
+  if (currentEngine === "postgres") {
+    params.set("schema", DEFAULT_PG_SCHEMA)
+  }
+
+  for (const [key, value] of Object.entries(extra)) {
+    if (value !== undefined && value !== null && value !== "") {
+      params.set(key, value)
+    }
+  }
+
+  const query = params.toString()
+  return query ? `?${query}` : ""
+}
+
 // UI helpers
 function showToast(message, type = "success") {
   const toast = document.getElementById("toast")
-  toast.textContent = message
+  toast.textContent = normalizeText(message)
   toast.className = `toast ${type} show`
 
   setTimeout(() => {
@@ -60,8 +83,91 @@ function truncate(str, length = 50) {
   return str.substring(0, length) + "..."
 }
 
+// Attempt to fix common UTF-8 mojibake (Ã, Â, Å etc.) when text was decoded with wrong encoding
+function normalizeText(text) {
+  if (typeof text !== "string") return text
+  if (!/[ÃÅÄÂ]/.test(text)) return text
+  try {
+    const bytes = Uint8Array.from(Array.from(text, (ch) => ch.charCodeAt(0)))
+    const decoded = new TextDecoder("utf-8").decode(bytes)
+    const looksBetter =
+      /[ğĞüÜşŞöÖçÇıİâîûÂÎÛ]/.test(decoded) || (decoded.length > 0 && decoded.length <= text.length + 3)
+    return looksBetter ? decoded : decoded
+  } catch (e) {
+    return text
+  }
+}
+
+function updateEngineTexts() {
+  const sidebarTitle = document.querySelector(".sidebar-title")
+  if (sidebarTitle) {
+    sidebarTitle.textContent = currentEngine === "mongo" ? "Koleksiyonlar" : "Tablolar"
+  }
+
+  const collectionName = document.getElementById("collectionName")
+  if (collectionName && !currentCollection) {
+    collectionName.textContent = currentEngine === "mongo" ? "Koleksiyon seçilmedi" : "Tablo seçilmedi"
+  }
+
+  const searchInput = document.getElementById("searchInput")
+  if (searchInput) {
+    searchInput.placeholder =
+      currentEngine === "mongo" ? "Filtre (JSON): {name: 'test'}" : 'Filtre (JSON): {"column": "value"}'
+    searchInput.value = ""
+  }
+
+  const createBtn = document.getElementById("createCollectionBtn")
+  if (createBtn) {
+    createBtn.title = currentEngine === "mongo" ? "Yeni Koleksiyon" : "Yeni Tablo"
+  }
+}
+
+function resetUiForEngineChange() {
+  currentPrimaryKey = currentEngine === "mongo" ? "_id" : "id"
+  currentSort = currentPrimaryKey
+  currentCollection = ""
+  currentPage = 1
+  currentOrder = "desc"
+  currentFilter = "{}"
+  selectedDocuments.clear()
+
+  const collectionsList = document.getElementById("collectionsList")
+  if (collectionsList) {
+    collectionsList.innerHTML = `
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 3h18v18H3zM3 9h18M9 21V9"/>
+          </svg>
+          <p>Bir veritabanı seçin</p>
+        </div>
+      `
+  }
+
+  const documentsTable = document.getElementById("documentsTable")
+  if (documentsTable) {
+    documentsTable.innerHTML = `
+      <div class="empty-state-large">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+        </svg>
+        <h3>${currentEngine === "mongo" ? "Bir koleksiyon seçin" : "Bir tablo seçin"}</h3>
+        <p>Sol taraftaki listeden başlayın</p>
+      </div>
+    `
+  }
+
+  const pagination = document.getElementById("pagination")
+  if (pagination) {
+    pagination.style.display = "none"
+  }
+
+  updateEngineTexts()
+}
+
 // Initialize
 async function init() {
+  updateEngineTexts()
   await loadDatabases()
   attachEventListeners()
 }
@@ -69,11 +175,12 @@ async function init() {
 // Load databases
 async function loadDatabases() {
   try {
-    const data = await fetchAPI("/api/databases")
+    const endpoint = currentEngine === "postgres" ? "/api/pg/databases" : "/api/databases"
+    const data = await fetchAPI(endpoint)
     const selector = document.getElementById("databaseSelector")
 
-    selector.innerHTML = '<option value="">Veritabanı Seçin...</option>'
-    data.databases.forEach((db) => {
+    selector.innerHTML = '<option value="">Veritabanı seçin...</option>'
+    ;(data.databases || []).forEach((db) => {
       const option = document.createElement("option")
       option.value = db
       option.textContent = db
@@ -87,16 +194,19 @@ async function loadDatabases() {
 // Load collections
 async function loadCollections(database) {
   try {
-    const data = await fetchAPI(`/api/collections?database=${database}`)
+    const query = buildQuery({ database })
+    const endpoint = currentEngine === "postgres" ? `/api/pg/tables${query}` : `/api/collections${query}`
+    const data = await fetchAPI(endpoint)
     const list = document.getElementById("collectionsList")
+    const items = currentEngine === "postgres" ? data.tables : data.collections
 
-    if (data.collections.length === 0) {
+    if (!items || items.length === 0) {
       list.innerHTML = `
         <div class="empty-state">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M3 3h18v18H3zM3 9h18M9 21V9"/>
           </svg>
-          <p>Koleksiyon bulunamadı</p>
+          <p>${currentEngine === "mongo" ? "Koleksiyon bulunamadı" : "Tablo bulunamadı"}</p>
         </div>
       `
       return
@@ -104,18 +214,22 @@ async function loadCollections(database) {
 
     list.innerHTML = ""
 
-    for (const collection of data.collections) {
-      const stats = await fetchAPI(`/api/collections/${collection}/stats?database=${database}`)
+    for (const collection of items) {
+    const stats = await fetchAPI(
+      currentEngine === "postgres"
+        ? `/api/pg/tables/${collection}/stats${query}`
+        : `/api/collections/${collection}/stats${query}`,
+    )
 
       const item = document.createElement("div")
       item.className = "collection-item"
       item.innerHTML = `
         <div class="collection-info">
-          <div class="collection-item-name">${collection}</div>
-          <div class="collection-item-count">${formatNumber(stats.count)} döküman</div>
+          <div class="collection-item-name">${normalizeText(collection)}</div>
+          <div class="collection-item-count">${formatNumber(stats.count)} ${currentEngine === "mongo" ? "döküman" : "satır"}</div>
         </div>
         <div class="collection-actions">
-          <button class="icon-btn danger" onclick="deleteCollection('${collection}')" title="Koleksiyonu Sil">
+          <button class="icon-btn danger" onclick="deleteCollection('${collection}')" title="${currentEngine === "mongo" ? "Koleksiyonu Sil" : "Tabloyu Sil"}">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="3 6 5 6 21 6"/>
               <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -126,7 +240,7 @@ async function loadCollections(database) {
 
       item.onclick = (e) => {
         if (!e.target.closest(".collection-actions")) {
-          selectCollection(collection, stats)
+          selectCollection(collection, stats, e)
         }
       }
 
@@ -138,33 +252,43 @@ async function loadCollections(database) {
 }
 
 // Select collection
-async function selectCollection(collection, stats) {
+async function selectCollection(collection, stats, evt) {
   currentCollection = collection
   currentPage = 1
   selectedDocuments.clear()
 
-  // Update UI
   document.querySelectorAll(".collection-item").forEach((item) => {
     item.classList.remove("active")
   })
-  event.currentTarget.classList.add("active")
 
-  document.getElementById("collectionName").textContent = collection
+  const clickEvent = evt || window.event
+  if (clickEvent && clickEvent.currentTarget) {
+    clickEvent.currentTarget.classList.add("active")
+  }
 
-  // Update stats
+  currentPrimaryKey = stats?.primaryKey || (currentEngine === "mongo" ? "_id" : "id")
+  currentSort = currentPrimaryKey
+
+  document.getElementById("collectionName").textContent = normalizeText(collection)
+
   const statsContainer = document.getElementById("collectionStats")
+  const itemLabel = currentEngine === "mongo" ? "döküman" : "satır"
   statsContainer.innerHTML = `
     <div class="stat-item">
-      <span class="stat-label">Döküman</span>
-      <span class="stat-value">${formatNumber(stats.count)}</span>
+      <span class="stat-label">${itemLabel}</span>
+      <span class="stat-value">${formatNumber(stats.count || 0)}</span>
     </div>
     <div class="stat-item">
       <span class="stat-label">Boyut</span>
-      <span class="stat-value">${formatBytes(stats.size)}</span>
+      <span class="stat-value">${formatBytes(stats.size || stats.storageSize || 0)}</span>
     </div>
     <div class="stat-item">
       <span class="stat-label">Index</span>
-      <span class="stat-value">${stats.indexes}</span>
+      <span class="stat-value">${stats.indexes ?? "-"}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">PK</span>
+      <span class="stat-value">${currentPrimaryKey || "-"}</span>
     </div>
   `
 
@@ -177,7 +301,6 @@ async function loadDocuments() {
 
   try {
     const params = new URLSearchParams({
-      database: currentDatabase,
       page: currentPage,
       limit: 20,
       sort: currentSort,
@@ -185,12 +308,28 @@ async function loadDocuments() {
       filter: currentFilter,
     })
 
-    const data = await fetchAPI(`/api/collections/${currentCollection}/documents?${params}`)
+    if (currentDatabase) {
+      params.set("database", currentDatabase)
+    }
+    if (currentEngine === "postgres") {
+      params.set("schema", DEFAULT_PG_SCHEMA)
+    }
+
+    const endpoint =
+      currentEngine === "postgres"
+        ? `/api/pg/tables/${currentCollection}/rows?${params}`
+        : `/api/collections/${currentCollection}/documents?${params}`
+
+    const data = await fetchAPI(endpoint)
+
+    if (data.primaryKey) {
+      currentPrimaryKey = data.primaryKey
+    }
 
     renderDocumentsTable(data.documents)
     renderPagination(data.pagination)
   } catch (error) {
-    console.error("Dökümanlar yüklenemedi:", error)
+    console.error("dökümanlar yüklenemedi:", error)
   }
 }
 
@@ -205,8 +344,8 @@ function renderDocumentsTable(documents) {
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
           <polyline points="14 2 14 8 20 8"/>
         </svg>
-        <h3>Döküman bulunamadı</h3>
-        <p>Bu koleksiyonda henüz döküman yok</p>
+        <h3>${currentEngine === "mongo" ? "döküman bulunamadı" : "satır bulunamadı"}</h3>
+        <p>${currentEngine === "mongo" ? "Bu koleksiyonda henüz döküman yok" : "Bu tabloda henüz satır yok"}</p>
       </div>
     `
     return
@@ -218,7 +357,16 @@ function renderDocumentsTable(documents) {
     Object.keys(doc).forEach((key) => allKeys.add(key))
   })
 
-  const keys = ["_id", ...Array.from(allKeys).filter((k) => k !== "_id")].slice(0, 6)
+  const keyOrder = []
+  if (currentPrimaryKey && allKeys.has(currentPrimaryKey)) {
+    keyOrder.push(currentPrimaryKey)
+  }
+  allKeys.forEach((key) => {
+    if (!keyOrder.includes(key)) {
+      keyOrder.push(key)
+    }
+  })
+  const keys = keyOrder.slice(0, 6)
 
   const table = document.createElement("div")
   table.className = "table-wrapper"
@@ -245,43 +393,57 @@ function renderDocumentsTable(documents) {
       <tbody>
         ${documents
           .map((doc) => {
-            const id = doc._id.toString()
+            const rawId = doc[currentPrimaryKey] ?? doc._id ?? doc.id
+            const id = rawId === undefined || rawId === null ? "" : String(rawId)
+            const isSelected = id && selectedDocuments.has(id)
+
+            const cells = keys
+              .map((key) => {
+                let value = doc[key]
+                if (value === undefined || value === null) return "<td>-</td>"
+
+                if (typeof value === "object") {
+                  value = JSON.stringify(value)
+                }
+
+                value = normalizeText(String(value))
+                const displayValue = truncate(value, key === currentPrimaryKey ? 24 : 50)
+
+                if (key === currentPrimaryKey) {
+                  return `<td class="id-cell">${displayValue}</td>`
+                }
+
+                return `<td class="code-cell" title="${value}">${displayValue}</td>`
+              })
+              .join("")
+
             return `
-            <tr class="${selectedDocuments.has(id) ? "selected" : ""}">
+            <tr class="${isSelected ? "selected" : ""}">
               <td class="checkbox-cell">
-                <input type="checkbox" class="checkbox doc-checkbox" data-id="${id}" ${selectedDocuments.has(id) ? "checked" : ""}>
+                <input type="checkbox" class="checkbox doc-checkbox" data-id="${id}" ${isSelected ? "checked" : ""} ${
+              id ? "" : "disabled"
+            }>
               </td>
-              ${keys
-                .map((key) => {
-                  let value = doc[key]
-                  if (value === undefined || value === null) return "<td>-</td>"
-
-                  if (key === "_id") {
-                    return `<td class="id-cell">${truncate(value.toString(), 24)}</td>`
-                  }
-
-                  if (typeof value === "object") {
-                    value = JSON.stringify(value)
-                  }
-
-                  return `<td class="code-cell" title="${value}">${truncate(String(value), 50)}</td>`
-                })
-                .join("")}
+              ${cells}
               <td class="actions-cell">
                 <div class="action-buttons">
-                  <button class="icon-btn" onclick="viewBeautiful('${id}')" title="Güzel Görünüm">
+                  <button class="icon-btn" onclick="viewBeautiful('${id}')" title="Güzel Görünüm" ${
+              id ? "" : "disabled"
+            }>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
                       <circle cx="12" cy="12" r="3"/>
                     </svg>
                   </button>
-                  <button class="icon-btn" onclick="editDocument('${id}')" title="Düzenle">
+                  <button class="icon-btn" onclick="editDocument('${id}')" title="Düzenle" ${id ? "" : "disabled"}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                       <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                     </svg>
                   </button>
-                  <button class="icon-btn danger" onclick="deleteDocument('${id}')" title="Sil">
+                  <button class="icon-btn danger" onclick="deleteDocument('${id}')" title="Sil" ${
+              id ? "" : "disabled"
+            }>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <polyline points="3 6 5 6 21 6"/>
                       <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -425,60 +587,86 @@ function updateBulkDeleteButton() {
 // CRUD operations
 async function editDocument(id) {
   try {
-    const documentData = await fetchAPI(
-      `/api/collections/${currentCollection}/documents/${id}?database=${currentDatabase}`,
-    )
+    const endpoint =
+      currentEngine === "postgres"
+        ? `/api/pg/tables/${currentCollection}/rows/${id}${buildQuery()}`
+        : `/api/collections/${currentCollection}/documents/${id}${buildQuery()}`
+    const documentData = await fetchAPI(endpoint)
 
     const modal = document.getElementById("modal")
     const editor = document.getElementById("documentEditor")
     const modalTitle = document.getElementById("modalTitle")
 
-    modalTitle.textContent = "Döküman Düzenle"
+    modalTitle.textContent = "döküman Düzenle"
     editor.value = JSON.stringify(documentData, null, 2)
     editor.dataset.documentId = id
     editor.dataset.mode = "edit"
 
     modal.classList.add("show")
   } catch (error) {
-    console.error("Döküman yüklenemedi:", error)
+    console.error("döküman yüklenemedi:", error)
   }
 }
 
 async function deleteDocument(id) {
-  if (!confirm("Bu dökümanı silmek istediğinizden emin misiniz?")) return
+  const message =
+    currentEngine === "mongo"
+      ? "Bu dökümanı silmek istediğinizden emin misiniz?"
+      : "Bu satırı silmek istediğinizden emin misiniz?"
+  if (!confirm(message)) return
 
   try {
-    await fetchAPI(`/api/collections/${currentCollection}/documents/${id}?database=${currentDatabase}`, {
+    const endpoint =
+      currentEngine === "postgres"
+        ? `/api/pg/tables/${currentCollection}/rows/${id}${buildQuery()}`
+        : `/api/collections/${currentCollection}/documents/${id}${buildQuery()}`
+
+    await fetchAPI(endpoint, {
       method: "DELETE",
     })
 
-    showToast("Döküman başarıyla silindi", "success")
+    showToast(currentEngine === "mongo" ? "döküman başarıyla silindi" : "satır başarıyla silindi", "success")
     selectedDocuments.delete(id)
     await loadDocuments()
   } catch (error) {
-    console.error("Döküman silinemedi:", error)
+    console.error("döküman silinemedi:", error)
   }
 }
 
 async function bulkDelete() {
   if (selectedDocuments.size === 0) return
 
-  if (!confirm(`${selectedDocuments.size} dökümanı silmek istediğinizden emin misiniz?`)) return
+  const bulkMessage =
+    currentEngine === "mongo"
+      ? `${selectedDocuments.size} dökümanı silmek istediğinizden emin misiniz?`
+      : `${selectedDocuments.size} satırı silmek istediğinizden emin misiniz?`
+  if (!confirm(bulkMessage)) return
 
   try {
-    await fetchAPI(`/api/collections/${currentCollection}/bulk-delete`, {
+    const endpoint =
+      currentEngine === "postgres"
+        ? `/api/pg/tables/${currentCollection}/bulk-delete`
+        : `/api/collections/${currentCollection}/bulk-delete`
+
+    const payload = {
+      database: currentDatabase,
+      ids: Array.from(selectedDocuments),
+    }
+    if (currentEngine === "postgres") {
+      payload.schema = DEFAULT_PG_SCHEMA
+    }
+
+    await fetchAPI(endpoint, {
       method: "POST",
-      body: JSON.stringify({
-        database: currentDatabase,
-        ids: Array.from(selectedDocuments),
-      }),
+      body: JSON.stringify(payload),
     })
 
-    showToast(`${selectedDocuments.size} döküman başarıyla silindi`, "success")
+    const deletedLabel = currentEngine === "mongo" ? "döküman" : "satır"
+    showToast(`${selectedDocuments.size} ${deletedLabel} başarıyla silindi`, "success")
     selectedDocuments.clear()
     await loadDocuments()
   } catch (error) {
-    console.error("Dökümanlar silinemedi:", error)
+    console.error("dökümanlar silinemedi:", error)
   }
 }
 
@@ -487,7 +675,7 @@ function addDocument() {
   const editor = document.getElementById("documentEditor")
   const modalTitle = document.getElementById("modalTitle")
 
-  modalTitle.textContent = "Yeni Döküman Ekle"
+  modalTitle.textContent = currentEngine === "mongo" ? "Yeni döküman Ekle" : "Yeni satır Ekle"
   editor.value = "{\n  \n}"
   editor.dataset.documentId = ""
   editor.dataset.mode = "add"
@@ -514,24 +702,37 @@ async function saveDocument() {
   errorDiv.classList.remove("show")
 
   try {
+    const payload = {
+      database: currentDatabase,
+      document: docData,
+    }
+    if (currentEngine === "postgres") {
+      payload.schema = DEFAULT_PG_SCHEMA
+    }
+
     if (mode === "add") {
-      await fetchAPI(`/api/collections/${currentCollection}/documents`, {
+      const endpoint =
+        currentEngine === "postgres"
+          ? `/api/pg/tables/${currentCollection}/rows`
+          : `/api/collections/${currentCollection}/documents`
+      await fetchAPI(endpoint, {
         method: "POST",
-        body: JSON.stringify({
-          database: currentDatabase,
-          document: docData,
-        }),
+        body: JSON.stringify(payload),
       })
-      showToast("Döküman başarıyla eklendi", "success")
+      showToast(currentEngine === "mongo" ? "döküman başarıyla eklendi" : "satır başarıyla eklendi", "success")
     } else {
-      await fetchAPI(`/api/collections/${currentCollection}/documents/${id}`, {
+      const endpoint =
+        currentEngine === "postgres"
+          ? `/api/pg/tables/${currentCollection}/rows/${id}`
+          : `/api/collections/${currentCollection}/documents/${id}`
+      await fetchAPI(endpoint, {
         method: "PUT",
-        body: JSON.stringify({
-          database: currentDatabase,
-          document: docData,
-        }),
+        body: JSON.stringify(payload),
       })
-      showToast("Döküman başarıyla güncellendi", "success")
+      showToast(
+        currentEngine === "mongo" ? "döküman başarıyla güncellendi" : "satır başarıyla güncellendi",
+        "success",
+      )
     }
 
     closeModal()
@@ -543,26 +744,36 @@ async function saveDocument() {
 }
 
 async function deleteCollection(collection) {
-  if (!confirm(`"${collection}" koleksiyonunu silmek istediğinizden emin misiniz? Bu işlem geri alınamaz!`)) return
+  const confirmText =
+    currentEngine === "mongo"
+      ? `"${collection}" koleksiyonunu silmek istediğinizden emin misiniz? Bu işlem geri alınamaz!`
+      : `"${collection}" tablosunu silmek istediğinizden emin misiniz? Bu işlem geri alınamaz!`
+  if (!confirm(confirmText)) return
 
   try {
-    await fetchAPI(`/api/collections/${collection}?database=${currentDatabase}`, {
+    const endpoint =
+      currentEngine === "postgres"
+        ? `/api/pg/tables/${collection}${buildQuery()}`
+        : `/api/collections/${collection}${buildQuery()}`
+
+    await fetchAPI(endpoint, {
       method: "DELETE",
     })
 
-    showToast("Koleksiyon başarıyla silindi", "success")
+    showToast(currentEngine === "mongo" ? "Koleksiyon başarıyla silindi" : "Tablo başarıyla silindi", "success")
 
     if (currentCollection === collection) {
       currentCollection = ""
-      document.getElementById("collectionName").textContent = "Koleksiyon seçilmedi"
+      document.getElementById("collectionName").textContent =
+        currentEngine === "mongo" ? "Koleksiyon seçilmedi" : "Tablo seçilmedi"
       document.getElementById("documentsTable").innerHTML = `
         <div class="empty-state-large">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
             <polyline points="14 2 14 8 20 8"/>
           </svg>
-          <h3>Bir koleksiyon seçin</h3>
-          <p>Sol taraftaki koleksiyon listesinden başlayın</p>
+          <h3>${currentEngine === "mongo" ? "Bir koleksiyon seçin" : "Bir tablo seçin"}</h3>
+          <p>Sol taraftaki ${currentEngine === "mongo" ? "koleksiyon" : "tablo"} listesinden başlayın</p>
         </div>
       `
     }
@@ -574,19 +785,28 @@ async function deleteCollection(collection) {
 }
 
 async function createCollection() {
-  const name = prompt("Yeni koleksiyon adı:")
+  const name = prompt(currentEngine === "mongo" ? "Yeni koleksiyon adı:" : "Yeni tablo adı:")
   if (!name) return
 
   try {
-    await fetchAPI("/api/collections", {
+    const endpoint = currentEngine === "postgres" ? "/api/pg/tables" : "/api/collections"
+    const payload = {
+      database: currentDatabase,
+      name,
+    }
+    if (currentEngine === "postgres") {
+      payload.schema = DEFAULT_PG_SCHEMA
+    }
+
+    await fetchAPI(endpoint, {
       method: "POST",
-      body: JSON.stringify({
-        database: currentDatabase,
-        name,
-      }),
+      body: JSON.stringify(payload),
     })
 
-    showToast("Koleksiyon başarıyla oluşturuldu", "success")
+    showToast(
+      currentEngine === "mongo" ? "Koleksiyon başarıyla oluşturuldu" : "Tablo başarıyla oluşturuldu",
+      "success",
+    )
     await loadCollections(currentDatabase)
   } catch (error) {
     console.error("Koleksiyon oluşturulamadı:", error)
@@ -603,6 +823,18 @@ function closeModal() {
 
 // Event listeners
 function attachEventListeners() {
+  // Engine selector
+  const engineSelector = document.getElementById("engineSelector")
+  if (engineSelector) {
+    engineSelector.addEventListener("change", (e) => {
+      currentEngine = e.target.value
+      resetUiForEngineChange()
+      document.getElementById("databaseSelector").value = ""
+      currentDatabase = ""
+      loadDatabases()
+    })
+  }
+
   // Database selector
   document.getElementById("databaseSelector").addEventListener("change", (e) => {
     currentDatabase = e.target.value
@@ -697,17 +929,19 @@ function formatTurkishDate(dateString) {
 
 async function viewBeautiful(id) {
   try {
-    const doc = await fetchAPI(
-      `/api/collections/${currentCollection}/documents/${id}?database=${currentDatabase}`,
-    )
+    const endpoint =
+      currentEngine === "postgres"
+        ? `/api/pg/tables/${currentCollection}/rows/${id}${buildQuery()}`
+        : `/api/collections/${currentCollection}/documents/${id}${buildQuery()}`
+    const doc = await fetchAPI(endpoint)
 
     const modal = document.getElementById("beautifulViewModal")
     const content = document.getElementById("beautifulViewContent")
 
     // Build metadata from available fields
     const metaFields = []
-    if (doc.language) metaFields.push(`<span class="meta-badge"><strong>Dil:</strong> ${doc.language}</span>`)
-    if (doc.model) metaFields.push(`<span class="meta-badge"><strong>Model:</strong> ${doc.model}</span>`)
+    if (doc.language) metaFields.push(`<span class="meta-badge"><strong>Dil:</strong> ${normalizeText(doc.language)}</span>`)
+    if (doc.model) metaFields.push(`<span class="meta-badge"><strong>Model:</strong> ${normalizeText(doc.model)}</span>`)
     if (doc.updatedAt) metaFields.push(`<span class="meta-badge"><strong>Güncellenme:</strong> ${formatTurkishDate(doc.updatedAt)}</span>`)
     if (doc.createdAt) metaFields.push(`<span class="meta-badge"><strong>Oluşturulma:</strong> ${formatTurkishDate(doc.createdAt)}</span>`)
 
@@ -715,7 +949,7 @@ async function viewBeautiful(id) {
     let html = `
       <div class="beautiful-document">
         <div class="beautiful-header">
-          <h1 class="beautiful-title">${doc.title || doc.subject || doc.name || "Başlıksız Döküman"}</h1>
+          <h1 class="beautiful-title">${normalizeText(doc.title || doc.subject || doc.name || "Başlıksız Kayıt")}</h1>
           <div class="beautiful-meta">
             ${metaFields.join("")}
           </div>
@@ -752,7 +986,7 @@ async function viewBeautiful(id) {
     
     modal.classList.add("show")
   } catch (error) {
-    console.error("Döküman yüklenemedi:", error)
+    console.error("döküman yüklenemedi:", error)
   }
 }
 
@@ -890,7 +1124,7 @@ function renderMessagesChat(messages, id) {
 
   messages.forEach((msg, index) => {
     const isUser = msg.role === "user" || msg.role === "user_message"
-    const msgContent = msg.content || msg.text || ""
+    const msgContent = normalizeText(msg.content || msg.text || "")
     const uniqueId = `msg-${id}-${index}`
     const timeHtml = msg.timestamp ? `<span class="message-time">${formatTurkishDate(new Date(msg.timestamp).toISOString())}</span>` : ""
 
@@ -943,7 +1177,7 @@ function renderOtherContent(doc) {
     if (key === "title" || key === "subject" || key === "name") continue
     if (Array.isArray(value) && value.length === 0) continue
 
-    const displayValue = typeof value === "object" ? JSON.stringify(value, null, 2) : String(value)
+    const displayValue = normalizeText(typeof value === "object" ? JSON.stringify(value, null, 2) : String(value))
     const uniqueId = `field-${key}`
 
     if (displayValue.length > 300) {
@@ -1026,3 +1260,9 @@ function closeBeautifulView() {
   const modal = document.getElementById("beautifulViewModal")
   modal.classList.remove("show")
 }
+
+
+
+
+
+

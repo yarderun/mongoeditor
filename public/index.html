@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MongoDB Admin Panel</title>
+  <title>Database Admin Panel</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -14,9 +14,13 @@
         <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
         </svg>
-        <h1 class="logo-text">MongoDB Admin Panel</h1>
+        <h1 class="logo-text">Database Admin Panel</h1>
       </div>
       <div class="header-right">
+        <select id="engineSelector" class="database-selector">
+          <option value="mongo">MongoDB</option>
+          <option value="postgres">PostgreSQL</option>
+        </select>
         <select id="databaseSelector" class="database-selector">
           <option value="">Veritabanı Seçin...</option>
         </select>
